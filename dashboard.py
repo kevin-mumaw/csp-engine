@@ -19,8 +19,7 @@ from datetime import datetime, date
 from dotenv import load_dotenv
 
 # ── LOAD API KEY FROM .env ───────────────────────────────────
-load_dotenv()
-POLYGON_API_KEY = os.getenv("POLYGON_API_KEY")
+POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
 
 # ── PAGE CONFIG ──────────────────────────────────────────────
 st.set_page_config(
