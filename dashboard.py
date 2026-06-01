@@ -16,7 +16,6 @@ import requests
 import os
 from scipy.stats import norm
 from datetime import datetime, date
-from dotenv import load_dotenv
 
 # ── LOAD API KEY FROM .env ───────────────────────────────────
 POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
