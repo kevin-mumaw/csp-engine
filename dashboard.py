@@ -253,6 +253,7 @@ with tab1:
             iv_pass  = False
             iv_hv_actual = 0
             current_iv   = 0
+            iv_missing   = False
 
             if not valid_exps:
                 st.warning(f"No expirations in {dte_min}–{dte_max} DTE window.")
@@ -276,8 +277,15 @@ with tab1:
                     ].copy()
 
                     current_iv   = float(filtered["impliedVolatility"].median()) if not filtered.empty else 0
-                    iv_hv_actual = current_iv / hv_30 if hv_30 > 0 else 0
-                    iv_pass      = iv_hv_actual >= iv_hv_ratio
+                    # If Tradier returns zero IV, bypass IV filter and flag it
+                    if current_iv == 0:
+                        iv_hv_actual = 0
+                        iv_pass      = True
+                        iv_missing   = True
+                    else:
+                        iv_hv_actual = current_iv / hv_30 if hv_30 > 0 else 0
+                        iv_pass      = iv_hv_actual >= iv_hv_ratio
+                        iv_missing   = False
                     chain_available = not filtered.empty
 
                     if chain_available:
@@ -321,9 +329,13 @@ with tab1:
             c1, c2, c3 = st.columns(3)
             c1.metric("Trend Filter", "✅ PASS" if trend_pass else "❌ FAIL")
             if chain_available:
-                c2.metric("IV Filter", "✅ PASS" if iv_pass else "❌ FAIL",
-                          f"IV/HV: {iv_hv_actual:.2f}x")
-                c3.metric("Chain IV (median)", f"{current_iv*100:.1f}%")
+                if iv_missing:
+                    c2.metric("IV Filter", "⚠️ BYPASSED", "IV data unavailable from Tradier")
+                    c3.metric("Chain IV (median)", "N/A")
+                else:
+                    c2.metric("IV Filter", "✅ PASS" if iv_pass else "❌ FAIL",
+                              f"IV/HV: {iv_hv_actual:.2f}x")
+                    c3.metric("Chain IV (median)", f"{current_iv*100:.1f}%")
 
             st.markdown("---")
 
