@@ -25,7 +25,7 @@ except:
     load_dotenv()
     TRADIER_API_KEY = os.getenv("TRADIER_API_KEY")
 
-TRADIER_BASE = "https://sandbox.tradier.com/v1"
+TRADIER_BASE = "https://api.tradier.com/v1"
 
 # ── PAGE CONFIG ──────────────────────────────────────────────
 st.set_page_config(
