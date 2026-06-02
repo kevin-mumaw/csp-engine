@@ -4,8 +4,8 @@
 # Purpose: Visual front-end for the HOOD CSP Scanner,
 #          Roll Engine, and Trade Log
 # Run with: py -m streamlit run dashboard.py
-# Data: Price/HV via yfinance | Options via Polygon.io
-# Last Updated: 2026-05-30
+# Data: Price/HV via yfinance | Options via Tradier
+# Last Updated: 2026-06-01
 # ============================================================
 
 import streamlit as st
@@ -16,9 +16,16 @@ import requests
 import os
 from scipy.stats import norm
 from datetime import datetime, date
+from dotenv import load_dotenv
 
-# ── LOAD API KEY FROM .env ───────────────────────────────────
-POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
+# ── LOAD API KEY ─────────────────────────────────────────────
+try:
+    TRADIER_API_KEY = st.secrets["TRADIER_API_KEY"]
+except:
+    load_dotenv()
+    TRADIER_API_KEY = os.getenv("TRADIER_API_KEY")
+
+TRADIER_BASE = "https://sandbox.tradier.com/v1"
 
 # ── PAGE CONFIG ──────────────────────────────────────────────
 st.set_page_config(
@@ -41,125 +48,87 @@ LOG_COLUMNS = [
 ]
 
 # ════════════════════════════════════════════════════════════
-# POLYGON DATA LAYER
+# TRADIER DATA LAYER
 # ════════════════════════════════════════════════════════════
 
-def polygon_get_expirations(ticker):
+HEADERS = {
+    "Authorization": f"Bearer {TRADIER_API_KEY}",
+    "Accept": "application/json",
+}
+
+def tradier_get_expirations(ticker):
     """
-    Step 1: Get all available put expiration dates for a ticker.
-    Uses the reference contracts endpoint — returns metadata only.
+    Fetch available options expiration dates for a ticker.
+    Returns a sorted list of date strings (YYYY-MM-DD).
+    Works 24/7 with Tradier sandbox.
     """
-    url    = "https://api.polygon.io/v3/reference/options/contracts"
-    params = {
-        "underlying_ticker": ticker.upper(),
-        "contract_type":     "put",
-        "expired":           "false",
-        "limit":             250,
-        "apiKey":            POLYGON_API_KEY,
-    }
+    url    = f"{TRADIER_BASE}/markets/options/expirations"
+    params = {"symbol": ticker.upper(), "includeAllRoots": "true"}
     try:
-        r    = requests.get(url, params=params, timeout=10)
+        r    = requests.get(url, headers=HEADERS, params=params, timeout=10)
         data = r.json()
-        if "results" not in data or not data["results"]:
+        expirations = data.get("expirations", {})
+        if not expirations or expirations == "null":
             return []
-        return sorted(set(c["expiration_date"] for c in data["results"]))
+        dates = expirations.get("date", [])
+        if isinstance(dates, str):
+            dates = [dates]
+        return sorted(dates)
     except Exception as e:
-        st.error(f"Polygon expiration fetch error: {e}")
+        st.error(f"Tradier expiration fetch error: {e}")
         return []
 
 
-def polygon_get_contract_tickers(ticker, expiration):
+def tradier_get_puts(ticker, expiration):
     """
-    Step 2: Get the Polygon option ticker symbols for a specific expiration.
-    e.g. O:HOOD260605P00071000
-    These are needed to fetch snapshots with bid/ask/IV.
+    Fetch full put options chain for a specific expiration.
+    Returns a DataFrame with strike, bid, ask, IV, OI, volume, greeks.
+    One call returns everything — much simpler than Polygon.
     """
-    url    = "https://api.polygon.io/v3/reference/options/contracts"
+    url    = f"{TRADIER_BASE}/markets/options/chains"
     params = {
-        "underlying_ticker": ticker.upper(),
-        "contract_type":     "put",
-        "expiration_date":   expiration,
-        "expired":           "false",
-        "limit":             250,
-        "apiKey":            POLYGON_API_KEY,
+        "symbol":     ticker.upper(),
+        "expiration": expiration,
+        "greeks":     "true",
     }
     try:
-        r    = requests.get(url, params=params, timeout=10)
+        r    = requests.get(url, headers=HEADERS, params=params, timeout=10)
         data = r.json()
-        if "results" not in data or not data["results"]:
-            return []
-        return [(c["ticker"], c["strike_price"]) for c in data["results"]]
+        options = data.get("options", {})
+        if not options or options == "null":
+            return pd.DataFrame()
+
+        all_options = options.get("option", [])
+        if isinstance(all_options, dict):
+            all_options = [all_options]
+
+        # Filter to puts only
+        puts = [o for o in all_options if o.get("option_type") == "put"]
+        if not puts:
+            return pd.DataFrame()
+
+        rows = []
+        for o in puts:
+            greeks = o.get("greeks") or {}
+            rows.append({
+                "strike":            float(o.get("strike", 0)),
+                "expiration":        expiration,
+                "bid":               float(o.get("bid", 0) or 0),
+                "ask":               float(o.get("ask", 0) or 0),
+                "impliedVolatility": float(o.get("implied_volatility", 0) or 0),
+                "openInterest":      int(o.get("open_interest", 0) or 0),
+                "volume":            int(o.get("volume", 0) or 0),
+                "delta":             float(greeks.get("delta", 0) or 0),
+                "theta":             float(greeks.get("theta", 0) or 0),
+            })
+
+        df = pd.DataFrame(rows)
+        df["mid_premium"] = (df["bid"] + df["ask"]) / 2
+        return df.sort_values("strike").reset_index(drop=True)
+
     except Exception as e:
-        st.error(f"Polygon contract ticker fetch error: {e}")
-        return []
-
-
-def polygon_get_puts(ticker, expiration):
-    """
-    Step 3: Fetch bid/ask/IV/OI for all puts at a given expiration.
-    Pulls contract tickers first, then batch-fetches snapshots.
-    Returns a clean DataFrame ready for the scanner.
-    """
-    contracts = polygon_get_contract_tickers(ticker, expiration)
-    if not contracts:
+        st.error(f"Tradier chain fetch error: {e}")
         return pd.DataFrame()
-
-    rows = []
-    # Polygon snapshot accepts comma-separated tickers (up to 250)
-    option_tickers = [c[0] for c in contracts]
-    strike_map     = {c[0]: c[1] for c in contracts}
-
-    # Batch in groups of 50 to stay within URL length limits
-    batch_size = 50
-    for i in range(0, len(option_tickers), batch_size):
-        batch  = option_tickers[i:i+batch_size]
-        joined = ",".join(batch)
-        url    = f"https://api.polygon.io/v3/snapshot"
-        params = {
-            "ticker.any_of": joined,
-            "apiKey":        POLYGON_API_KEY,
-        }
-        try:
-            r    = requests.get(url, params=params, timeout=15)
-            data = r.json()
-            if "results" not in data or not data["results"]:
-                continue
-
-            for item in data["results"]:
-                opt_ticker = item.get("ticker", "")
-                strike     = strike_map.get(opt_ticker, 0)
-                details    = item.get("details", {})
-                greeks     = item.get("greeks", {})
-                day        = item.get("day", {})
-                last_quote = item.get("last_quote", {})
-
-                bid = last_quote.get("bid", 0) or 0
-                ask = last_quote.get("ask", 0) or 0
-                iv  = item.get("implied_volatility", 0) or 0
-                oi  = item.get("open_interest", 0) or 0
-                vol = day.get("volume", 0) or 0
-
-                rows.append({
-                    "strike":            strike,
-                    "expiration":        expiration,
-                    "bid":               bid,
-                    "ask":               ask,
-                    "impliedVolatility": iv,
-                    "openInterest":      oi,
-                    "volume":            vol,
-                    "delta":             greeks.get("delta", None),
-                    "option_ticker":     opt_ticker,
-                })
-        except Exception as e:
-            st.warning(f"Snapshot batch error: {e}")
-            continue
-
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    df["mid_premium"] = (df["bid"] + df["ask"]) / 2
-    return df.sort_values("strike").reset_index(drop=True)
 
 
 # ════════════════════════════════════════════════════════════
@@ -220,8 +189,8 @@ def append_log_event(df, event_type, ticker, contracts, strike, expiration,
 
 
 # ── API KEY CHECK ────────────────────────────────────────────
-if not POLYGON_API_KEY:
-    st.error("⚠️ POLYGON_API_KEY not found. Make sure your .env file is in the same folder as dashboard.py.")
+if not TRADIER_API_KEY:
+    st.error("⚠️ TRADIER_API_KEY not found. Add it to your Streamlit secrets.")
     st.stop()
 
 # ── SIDEBAR CONFIG ───────────────────────────────────────────
@@ -238,7 +207,7 @@ iv_hv_ratio  = st.sidebar.number_input("IV/HV Ratio Min", value=1.10, step=0.05)
 roll_trigger = st.sidebar.number_input("Roll Trigger (%)", value=4.0, step=0.5) / 100
 
 st.sidebar.markdown("---")
-st.sidebar.caption("CSP Engine v1.2 — Polygon Data")
+st.sidebar.caption("CSP Engine v1.3 — Tradier Data")
 
 # ── TABS ─────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["📡 Scanner", "🔄 Roll Engine", "📝 Trade Log", "📊 Performance"])
@@ -268,9 +237,9 @@ with tab1:
             log_returns = np.log(close / close.shift(1)).dropna()
             hv_30       = float(log_returns[-30:].std() * np.sqrt(252))
 
-            # ── Expirations via Polygon ──────────────────────
-            today    = date.today()
-            all_exps = polygon_get_expirations(ticker)
+            # ── Expirations via Tradier ──────────────────────
+            today      = date.today()
+            all_exps   = tradier_get_expirations(ticker)
             valid_exps = [
                 (e, (datetime.strptime(e, "%Y-%m-%d").date() - today).days)
                 for e in all_exps
@@ -281,6 +250,9 @@ with tab1:
             filtered = pd.DataFrame()
             dc       = pd.DataFrame()
             best_strike = None
+            iv_pass  = False
+            iv_hv_actual = 0
+            current_iv   = 0
 
             if not valid_exps:
                 st.warning(f"No expirations in {dte_min}–{dte_max} DTE window.")
@@ -288,13 +260,13 @@ with tab1:
             else:
                 all_puts = []
                 for exp, dte in valid_exps:
-                    puts = polygon_get_puts(ticker, exp)
+                    puts = tradier_get_puts(ticker, exp)
                     if not puts.empty:
                         puts["dte"] = dte
                         all_puts.append(puts)
 
                 if not all_puts:
-                    st.warning("Options snapshot returned no bid/ask data from Polygon.")
+                    st.warning("Options chain returned no data from Tradier.")
                 else:
                     puts_df  = pd.concat(all_puts, ignore_index=True)
                     filtered = puts_df[
@@ -309,12 +281,17 @@ with tab1:
                     chain_available = not filtered.empty
 
                     if chain_available:
-                        filtered["delta_proxy"] = filtered.apply(
-                            lambda r: moneyness_delta_proxy(
-                                r["strike"], current_price,
-                                r["impliedVolatility"], r["dte"]
-                            ), axis=1
-                        )
+                        # Use real delta from Tradier if available, else proxy
+                        if filtered["delta"].abs().sum() > 0:
+                            filtered["delta_proxy"] = filtered["delta"].abs()
+                        else:
+                            filtered["delta_proxy"] = filtered.apply(
+                                lambda r: moneyness_delta_proxy(
+                                    r["strike"], current_price,
+                                    r["impliedVolatility"], r["dte"]
+                                ), axis=1
+                            )
+
                         dc = filtered[
                             (filtered["delta_proxy"] >= delta_min) &
                             (filtered["delta_proxy"] <= delta_max)
@@ -359,14 +336,14 @@ with tab1:
                 r2.metric("Expiration",          best["expiration"])
                 r3.metric("DTE",                 int(best["dte"]))
                 r4.metric("Est. Premium (mid)",  f"${best['mid_premium']:.2f}")
-                r5.metric("Delta Proxy",          f"{best['delta_proxy']:.3f}")
+                r5.metric("Delta",               f"{best['delta_proxy']:.3f}")
                 roll_price = round(current_price * (1 + roll_trigger), 2)
                 st.info(f"🔄 Roll trigger at ${roll_price} (+{int(roll_trigger*100)}% from current price)")
             else:
                 st.error("❌ SIGNAL: NO-GO — Conditions not met")
                 reasons = []
                 if not trend_pass:      reasons.append("Bearish trend structure")
-                if not chain_available: reasons.append("No bid/ask data returned from Polygon — market may be closed")
+                if not chain_available: reasons.append("No options data returned from Tradier")
                 elif not iv_pass:       reasons.append("IV not elevated enough vs historical vol")
                 if chain_available and best_strike is None:
                     reasons.append("No strikes found in target delta range")
@@ -377,7 +354,8 @@ with tab1:
                 st.markdown("#### Strike Candidates")
                 st.dataframe(
                     dc[["strike", "expiration", "dte", "bid", "ask",
-                        "mid_premium", "delta_proxy", "openInterest", "volume", "score"]].round(3),
+                        "mid_premium", "delta_proxy", "delta", "theta",
+                        "openInterest", "volume", "score"]].round(3),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -391,12 +369,12 @@ with tab2:
     st.caption("Enter your open position to evaluate roll conditions.")
 
     re_ticker   = st.text_input("Ticker", value="HOOD", key="re_ticker").upper()
-    re_exps     = polygon_get_expirations(re_ticker) if re_ticker else []
+    re_exps     = tradier_get_expirations(re_ticker) if re_ticker else []
     today       = date.today()
     future_exps = [e for e in re_exps if datetime.strptime(e, "%Y-%m-%d").date() >= today]
 
     with st.form("roll_form"):
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         r_contracts   = col1.number_input("Contracts", value=3, min_value=1)
         r_entry_prem  = col1.number_input("Entry Premium ($/share)", value=1.50, step=0.05)
         r_entry_price = col1.number_input("Entry Stock Price ($)", value=76.00, step=0.50)
@@ -414,10 +392,10 @@ with tab2:
                 cur_price = float(raw2["Close"].squeeze().iloc[-1])
                 price_move_pct = (cur_price - r_entry_price) / r_entry_price
 
-                puts2 = polygon_get_puts(re_ticker, r_expiration)
+                puts2 = tradier_get_puts(re_ticker, r_expiration)
 
                 if puts2.empty:
-                    st.warning("No options data returned from Polygon. Market may be closed — bid/ask unavailable.")
+                    st.warning("No options data returned from Tradier.")
                     buyback_cost = None
                 else:
                     row = puts2[puts2["strike"] == r_strike]
@@ -459,7 +437,7 @@ with tab2:
 
                     candidates["net_credit_share"] = candidates["mid_premium"] - buyback_cost
                     candidates["net_credit_total"] = candidates["net_credit_share"] * r_contracts * MULTIPLIER
-                    candidates["delta_proxy"]      = candidates.apply(
+                    candidates["delta_proxy"]      = candidates["delta"].abs() if candidates["delta"].abs().sum() > 0 else candidates.apply(
                         lambda r: moneyness_delta_proxy(r["strike"], cur_price, r["impliedVolatility"], dte_remaining),
                         axis=1
                     )
