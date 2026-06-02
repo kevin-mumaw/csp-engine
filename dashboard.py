@@ -538,6 +538,32 @@ with tab3:
             use_container_width=True,
             hide_index=True,
         )
+
+        # ── Delete Entry ─────────────────────────────────────
+        st.markdown("#### Delete a Log Entry")
+        del_col1, del_col2 = st.columns([1, 3])
+        del_id = del_col1.number_input(
+            "Log ID to delete",
+            min_value=1,
+            max_value=int(log_df["log_id"].max()),
+            value=int(log_df["log_id"].max()),
+            step=1
+        )
+        # Show the row they're about to delete
+        preview = log_df[log_df["log_id"] == del_id]
+        if not preview.empty:
+            del_col2.write(f"**{preview.iloc[0]['event_type']}** — {preview.iloc[0]['ticker']} ${preview.iloc[0]['strike']} | {preview.iloc[0]['expiration']} | ${preview.iloc[0]['net_credit_total']}")
+
+        if st.button("🗑️ Delete Entry", type="secondary"):
+            st.session_state.trade_log = log_df[log_df["log_id"] != del_id].reset_index(drop=True)
+            # Recalculate log_ids and cumulative premium after deletion
+            st.session_state.trade_log["log_id"] = range(1, len(st.session_state.trade_log) + 1)
+            st.session_state.trade_log["cumulative_premium"] = st.session_state.trade_log["net_credit_total"].cumsum().round(2)
+            save_log(st.session_state.trade_log)
+            st.success(f"✅ Entry {del_id} deleted.")
+            st.rerun()
+
+        # ── Download ─────────────────────────────────────────
         csv_data = log_df.to_csv(index=False).encode("utf-8")
         st.download_button(
             label="⬇️ Download Trade Log (CSV)",
