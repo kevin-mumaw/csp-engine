@@ -5,7 +5,7 @@
 #          Roll Engine, and Trade Log
 # Run with: py -m streamlit run dashboard.py
 # Data: Price/HV via yfinance | Options via Tradier
-# Last Updated: 2026-06-04
+# Last Updated: 2026-06-01
 # ============================================================
 
 import streamlit as st
@@ -62,12 +62,16 @@ def tradier_get_expirations(ticker):
     """
     Fetch available options expiration dates for a ticker.
     Returns a sorted list of date strings (YYYY-MM-DD).
-    Works 24/7 with Tradier sandbox.
+    Works 24/7 with Tradier production API.
     """
+    if not ticker or len(ticker) < 1:
+        return []
     url    = f"{TRADIER_BASE}/markets/options/expirations"
     params = {"symbol": ticker.upper(), "includeAllRoots": "true"}
     try:
         r    = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        if r.status_code != 200 or not r.text.strip():
+            return []
         data = r.json()
         expirations = data.get("expirations", {})
         if not expirations or expirations == "null":
@@ -438,9 +442,12 @@ with tab2:
     st.caption("Enter your open position to evaluate roll conditions.")
 
     re_ticker   = st.text_input("Ticker", value="HOOD", key="re_ticker").upper()
-    re_exps     = tradier_get_expirations(re_ticker) if re_ticker else []
+    re_exps     = tradier_get_expirations(re_ticker) if re_ticker and len(re_ticker) >= 1 else []
     today       = date.today()
-    future_exps = [e for e in re_exps if datetime.strptime(e, "%Y-%m-%d").date() >= today]
+    future_exps = [e for e in re_exps if datetime.strptime(e, "%Y-%m-%d").date() >= today] if re_exps else []
+
+    if not future_exps:
+        st.info("Enter a ticker above to load available expirations.")
 
     with st.form("roll_form"):
         col1, col2 = st.columns(2)
