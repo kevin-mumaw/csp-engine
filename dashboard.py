@@ -475,7 +475,11 @@ with tab2:
                     buyback_cost = None
                 else:
                     row = puts2[puts2["strike"] == r_strike]
-                    buyback_cost = float(row["ask"].iloc[0]) if not row.empty else None
+                    if row.empty:
+                        st.warning(f"Strike ${r_strike} not found in chain. Available strikes: {sorted(puts2['strike'].tolist())}")
+                        buyback_cost = None
+                    else:
+                        buyback_cost = float(row["ask"].iloc[0])
 
                 move_ok    = price_move_pct >= roll_trigger
                 buyback_ok = (buyback_cost is not None) and (buyback_cost <= r_entry_prem * 0.25)
@@ -511,45 +515,48 @@ with tab2:
                         (puts2["bid"] > 0)
                     ].copy()
 
-                    candidates["net_credit_share"] = candidates["mid_premium"] - buyback_cost
-                    candidates["net_credit_total"] = candidates["net_credit_share"] * r_contracts * MULTIPLIER
-                    candidates["delta_proxy"]      = candidates["delta"].abs() if candidates["delta"].abs().sum() > 0 else candidates.apply(
-                        lambda r: moneyness_delta_proxy(r["strike"], cur_price, r["impliedVolatility"], dte_remaining),
-                        axis=1
-                    )
-
-                    credit_only = candidates[candidates["net_credit_share"] > 0].copy()
-
-                    if credit_only.empty:
-                        st.warning("No credit rolls available. Wait for more premium decay or a further move up.")
+                    if candidates.empty:
+                        st.warning("No roll candidates found above current strike with a valid bid.")
                     else:
-                        credit_only["delta_score"] = (1 - abs(credit_only["delta_proxy"] - 0.25) / 0.25).clip(0, 1)
-                        for col in ["net_credit_share", "openInterest"]:
-                            mn, mx = credit_only[col].min(), credit_only[col].max()
-                            credit_only[f"{col}_score"] = (credit_only[col] - mn) / (mx - mn) if mx > mn else 1.0
-                        credit_only["score"] = (
-                            credit_only["net_credit_share_score"] * 0.50 +
-                            credit_only["delta_score"]             * 0.30 +
-                            credit_only["openInterest_score"]      * 0.20
+                        candidates["net_credit_share"] = candidates["mid_premium"] - buyback_cost
+                        candidates["net_credit_total"] = candidates["net_credit_share"] * r_contracts * MULTIPLIER
+                        candidates["delta_proxy"]      = candidates["delta"].abs() if candidates["delta"].abs().sum() > 0 else candidates.apply(
+                            lambda r: moneyness_delta_proxy(r["strike"], cur_price, r["impliedVolatility"], dte_remaining),
+                            axis=1
                         )
-                        credit_only = credit_only.sort_values("score", ascending=False)
-                        best_roll   = credit_only.iloc[0]
 
-                        st.markdown("#### Roll Recommendation")
-                        b1, b2, b3, b4 = st.columns(4)
-                        b1.metric("New Strike",   f"${best_roll['strike']}")
-                        b2.metric("New Premium",  f"${best_roll['mid_premium']:.2f}/sh")
-                        b3.metric("Net Credit",   f"${best_roll['net_credit_share']:.2f}/sh")
-                        b4.metric("Total Credit", f"${best_roll['net_credit_total']:.2f}")
+                        credit_only = candidates[candidates["net_credit_share"] > 0].copy()
 
-                        st.dataframe(
-                            credit_only[["strike", "mid_premium", "delta_proxy",
-                                         "net_credit_share", "net_credit_total",
-                                         "openInterest", "score"]].round(3),
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-                        st.info("⚠️ Verify fills on thinkorswim. Always use a limit order — never market order.")
+                        if credit_only.empty:
+                            st.warning("No credit rolls available. Wait for more premium decay or a further move up.")
+                        else:
+                            credit_only["delta_score"] = (1 - abs(credit_only["delta_proxy"] - 0.25) / 0.25).clip(0, 1)
+                            for col in ["net_credit_share", "openInterest"]:
+                                mn, mx = credit_only[col].min(), credit_only[col].max()
+                                credit_only[f"{col}_score"] = (credit_only[col] - mn) / (mx - mn) if mx > mn else 1.0
+                            credit_only["score"] = (
+                                credit_only["net_credit_share_score"] * 0.50 +
+                                credit_only["delta_score"]             * 0.30 +
+                                credit_only["openInterest_score"]      * 0.20
+                            )
+                            credit_only = credit_only.sort_values("score", ascending=False)
+                            best_roll   = credit_only.iloc[0]
+
+                            st.markdown("#### Roll Recommendation")
+                            b1, b2, b3, b4 = st.columns(4)
+                            b1.metric("New Strike",   f"${best_roll['strike']}")
+                            b2.metric("New Premium",  f"${best_roll['mid_premium']:.2f}/sh")
+                            b3.metric("Net Credit",   f"${best_roll['net_credit_share']:.2f}/sh")
+                            b4.metric("Total Credit", f"${best_roll['net_credit_total']:.2f}")
+
+                            st.dataframe(
+                                credit_only[["strike", "mid_premium", "delta_proxy",
+                                             "net_credit_share", "net_credit_total",
+                                             "openInterest", "score"]].round(3),
+                                use_container_width=True,
+                                hide_index=True,
+                            )
+                            st.info("⚠️ Verify fills on thinkorswim. Always use a limit order — never market order.")
 
             except Exception as e:
                 st.error(f"Error: {e}")
