@@ -610,7 +610,63 @@ with tab3:
             hide_index=True,
         )
 
-        # ── Delete Entry ─────────────────────────────────────
+               # ── Edit Entry ───────────────────────────────────────
+       st.markdown("#### Edit a Log Entry")
+       edit_id = st.number_input(
+           "Log ID to edit",
+           min_value=1,
+           max_value=int(log_df["log_id"].max()),
+           value=int(log_df["log_id"].max()),
+           step=1,
+           key="edit_id"
+       )
+
+       edit_row = log_df[log_df["log_id"] == edit_id]
+       if not edit_row.empty:
+           er = edit_row.iloc[0]
+           with st.form("edit_form"):
+               ec1, ec2, ec3 = st.columns(3)
+               e_event     = ec1.selectbox("Event Type", ["ENTRY", "ROLL", "EXIT", "EXPIRED"],
+                                           index=["ENTRY", "ROLL", "EXIT", "EXPIRED"].index(er["event_type"]))
+               e_ticker    = ec1.text_input("Ticker", value=er["ticker"])
+               e_contracts = ec1.number_input("Contracts", value=int(er["contracts"]), min_value=1)
+               e_strike    = ec2.number_input("Strike ($)", value=float(er["strike"]), step=0.50)
+               e_exp       = ec2.text_input("Expiration", value=er["expiration"])
+               e_dte       = ec2.number_input("DTE at Event", value=int(er["dte_at_event"]), min_value=0)
+               e_price     = ec3.number_input("Stock Price ($)", value=float(er["stock_price"]), step=0.50)
+               e_prem      = ec3.number_input("Premium ($/share)", value=float(er["premium_per_share"]), step=0.05)
+               e_buyback   = ec3.number_input("Buyback ($/share)", value=float(er["buyback_per_share"]), step=0.05)
+               e_notes     = st.text_input("Notes", value=str(er["notes"]))
+               edit_submitted = st.form_submit_button("💾 Save Changes", type="primary")
+
+           if edit_submitted:
+               multiplier       = 100
+               net_credit_per   = round(e_prem - e_buyback, 4)
+               net_credit_total = round(net_credit_per * e_contracts * multiplier, 2)
+
+               idx = log_df[log_df["log_id"] == edit_id].index[0]
+               log_df.at[idx, "event_type"]           = e_event
+               log_df.at[idx, "ticker"]               = e_ticker.upper()
+               log_df.at[idx, "contracts"]            = e_contracts
+               log_df.at[idx, "strike"]               = e_strike
+               log_df.at[idx, "expiration"]           = e_exp
+               log_df.at[idx, "dte_at_event"]         = e_dte
+               log_df.at[idx, "stock_price"]          = e_price
+               log_df.at[idx, "premium_per_share"]    = e_prem
+               log_df.at[idx, "premium_total"]        = round(e_prem * e_contracts * multiplier, 2)
+               log_df.at[idx, "buyback_per_share"]    = e_buyback
+               log_df.at[idx, "buyback_total"]        = round(e_buyback * e_contracts * multiplier, 2)
+               log_df.at[idx, "net_credit_per_share"] = net_credit_per
+               log_df.at[idx, "net_credit_total"]     = net_credit_total
+               log_df.at[idx, "notes"]                = e_notes
+
+               log_df["cumulative_premium"] = log_df["net_credit_total"].cumsum().round(2)
+               st.session_state.trade_log = log_df
+               save_log(log_df)
+               st.success(f"✅ Entry {edit_id} updated.")
+               st.rerun()
+
+# ── Delete Entry ─────────────────────────────────────
         st.markdown("#### Delete a Log Entry")
         del_col1, del_col2 = st.columns([1, 3])
         del_id = del_col1.number_input(
