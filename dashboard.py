@@ -610,7 +610,7 @@ with tab3:
             hide_index=True,
         )
 
-               # ── Edit Entry ───────────────────────────────────────
+ # ── Edit Entry ───────────────────────────────────────
        st.markdown("#### Edit a Log Entry")
        edit_id = st.number_input(
            "Log ID to edit",
