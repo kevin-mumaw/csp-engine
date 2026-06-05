@@ -5,7 +5,7 @@
 #          Roll Engine, and Trade Log
 # Run with: py -m streamlit run dashboard.py
 # Data: Price/HV via yfinance | Options via Tradier
-# Last Updated: 2026-06-01
+# Last Updated: 2026-06-04
 # ============================================================
 
 import streamlit as st
@@ -14,6 +14,8 @@ import pandas as pd
 import numpy as np
 import requests
 import os
+import gspread
+from google.oauth2.service_account import Credentials
 from scipy.stats import norm
 from datetime import datetime, date
 from dotenv import load_dotenv
@@ -135,14 +137,69 @@ def tradier_get_puts(ticker, expiration):
 # SHARED HELPERS
 # ════════════════════════════════════════════════════════════
 
+# ════════════════════════════════════════════════════════════
+# GOOGLE DRIVE TRADE LOG
+# ════════════════════════════════════════════════════════════
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource
+def get_gsheet():
+    """Connect to Google Sheets using service account credentials."""
+    try:
+        creds = Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=SCOPES,
+        )
+        client = gspread.authorize(creds)
+        # Open the spreadsheet by name — creates it if it doesn't exist
+        try:
+            sheet = client.open("csp_trade_log").sheet1
+        except gspread.SpreadsheetNotFound:
+            spreadsheet = client.create("csp_trade_log")
+            spreadsheet.share(
+                st.secrets["gcp_service_account"]["client_email"],
+                perm_type="user",
+                role="writer",
+            )
+            sheet = spreadsheet.sheet1
+            sheet.append_row(LOG_COLUMNS)
+        return sheet
+    except Exception as e:
+        st.error(f"Google Sheets connection error: {e}")
+        return None
+
+
 def load_log():
-    if os.path.exists(LOG_FILE):
-        return pd.read_csv(LOG_FILE)
-    return pd.DataFrame(columns=LOG_COLUMNS)
+    """Load trade log from Google Sheets."""
+    sheet = get_gsheet()
+    if sheet is None:
+        return pd.DataFrame(columns=LOG_COLUMNS)
+    try:
+        data = sheet.get_all_records()
+        if not data:
+            return pd.DataFrame(columns=LOG_COLUMNS)
+        return pd.DataFrame(data)
+    except Exception as e:
+        st.error(f"Error loading log: {e}")
+        return pd.DataFrame(columns=LOG_COLUMNS)
 
 
 def save_log(df):
-    df.to_csv(LOG_FILE, index=False)
+    """Save entire trade log back to Google Sheets."""
+    sheet = get_gsheet()
+    if sheet is None:
+        return
+    try:
+        sheet.clear()
+        sheet.append_row(LOG_COLUMNS)
+        for _, row in df.iterrows():
+            sheet.append_row(row.tolist())
+    except Exception as e:
+        st.error(f"Error saving log: {e}")
 
 
 def moneyness_delta_proxy(strike, price, iv, dte_days):
